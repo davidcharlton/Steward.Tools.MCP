@@ -16,15 +16,20 @@ public class StewardConfig
     public string ScriptureProgressPath => Path.Combine(DataDir, "scripture_progress.json");
     public string CanonDir => Path.Combine(WorkspaceDir, "steward", "canon");
 
-    public StewardConfig()
+    public StewardConfig() : this(null, null) { }
+
+    /// <summary>Create config with explicit data/workspace dirs (for multi-user hosting).</summary>
+    public StewardConfig(string? dataDir = null, string? workspaceDir = null)
     {
         var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         var defaultBase = Path.Combine(home, ".steward");
 
-        DataDir = Environment.GetEnvironmentVariable("STEWARD_DATA_DIR")
+        DataDir = dataDir
+            ?? Environment.GetEnvironmentVariable("STEWARD_DATA_DIR")
             ?? Path.Combine(defaultBase, "data");
 
-        WorkspaceDir = Environment.GetEnvironmentVariable("STEWARD_WORKSPACE_DIR")
+        WorkspaceDir = workspaceDir
+            ?? Environment.GetEnvironmentVariable("STEWARD_WORKSPACE_DIR")
             ?? Path.Combine(defaultBase, "workspace");
 
         LlmApiKey = Environment.GetEnvironmentVariable("STEWARD_LLM_API_KEY") ?? "";

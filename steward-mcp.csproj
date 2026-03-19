@@ -14,8 +14,8 @@
     <Description>A formation-based AI personal steward — MCP server providing hierarchical memory, Scripture formation, and workspace tools for Claude and other MCP hosts.</Description>
     <Authors>ReallySmall LLC</Authors>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
-    <PackageProjectUrl>https://github.com/davidcharlton/Steward.Tools.MCP</PackageProjectUrl>
-    <RepositoryUrl>https://github.com/davidcharlton/Steward.Tools.MCP</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/davidcharlton/steward</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/davidcharlton/steward</RepositoryUrl>
     <PackageTags>mcp;ai;steward;formation;memory;claude</PackageTags>
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>steward-mcp</ToolCommandName>
