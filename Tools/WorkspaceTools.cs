@@ -9,10 +9,12 @@ namespace StewardMcp.Tools;
 public class WorkspaceTools
 {
     private readonly WorkspaceService _ws;
+    private readonly WorkspaceDbService _db;
 
-    public WorkspaceTools(WorkspaceService ws)
+    public WorkspaceTools(WorkspaceService ws, WorkspaceDbService db)
     {
         _ws = ws;
+        _db = db;
     }
 
     [McpServerTool]
@@ -94,5 +96,48 @@ public class WorkspaceTools
     {
         var result = await _ws.DeleteAsync(path);
         return result;
+    }
+
+    // --- Workspace Databases ---
+
+    [McpServerTool]
+    [Description("List workspace databases and their tables. The steward can create SQLite databases to track structured data (contacts, collections, budgets, etc.).")]
+    public string WorkspaceDbList()
+    {
+        var dbs = _db.ListDatabases();
+        var result = dbs.Select(name => new
+        {
+            name,
+            tables = _db.ListTables(name),
+        }).ToList();
+        return JsonSerializer.Serialize(new { count = result.Count, databases = result });
+    }
+
+    [McpServerTool]
+    [Description("Execute a write operation on a workspace database (CREATE TABLE, INSERT, UPDATE, DELETE). Database is created automatically on first use. Provide a description for semantic search indexing.")]
+    public async Task<string> WorkspaceDbExecute(
+        [Description("Database name (e.g., 'contacts', 'baseball-cards')")] string dbName,
+        [Description("SQL to execute")] string sql,
+        [Description("Optional: natural language description of what was stored, for semantic search")] string? description = null,
+        [Description("Optional: SELECT query to run after the write, embedding the results for search")] string? embedQuery = null)
+    {
+        ExecuteResult result;
+        if (embedQuery != null)
+            result = await _db.ExecuteAndEmbedAsync(dbName, sql, embedQuery);
+        else
+            result = await _db.ExecuteAsync(dbName, sql, description);
+
+        return JsonSerializer.Serialize(new { ok = true, dbName, affectedRows = result.AffectedRows });
+    }
+
+    [McpServerTool]
+    [Description("Query a workspace database (SELECT). Returns rows as structured data.")]
+    public string WorkspaceDbQuery(
+        [Description("Database name")] string dbName,
+        [Description("SELECT query")] string sql,
+        [Description("Max rows to return (default 100)")] int maxRows = 100)
+    {
+        var result = _db.Query(dbName, sql, maxRows);
+        return JsonSerializer.Serialize(new { dbName, columns = result.Columns, rowCount = result.RowCount, rows = result.Rows });
     }
 }

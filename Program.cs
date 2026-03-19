@@ -34,6 +34,7 @@ builder.Services.AddSingleton<VectorStore>();
 builder.Services.AddSingleton<LlmService>();
 builder.Services.AddSingleton<IEmbeddingProvider>(sp => sp.GetRequiredService<LlmService>());
 builder.Services.AddScoped<WorkspaceService>();
+builder.Services.AddSingleton<WorkspaceDbService>();
 
 // Formation
 builder.Services.AddSingleton<Canon>();
