@@ -8,7 +8,7 @@ Your steward journals your conversations, compresses them into a reflection tree
 
 **Persistent memory across sessions.** Every conversation is journaled and compressed through a hierarchical reflection tree. Recent exchanges are kept at high resolution; older ones compress proportionally. Your steward remembers what matters.
 
-**Formation, not restriction.** The steward's character is shaped by ongoing Scripture meditation and configurable mindfulness threads — not rules or guardrails. The result is an AI with genuine orientation, not one that's been prevented from doing things.
+**Formation, not restriction.** Summarization requires judgment — what matters, what doesn't, what to keep, what to let go. That judgment needs a frame of reference. The steward's is shaped by ongoing Scripture meditation: an orientation toward faithful service that guides it to compress toward what the person actually cares about, not just what's statistically prominent. The result is intelligent compression aligned with the user's goals, not mechanical reduction.
 
 **Cross-system portability.** Feed conversations from any source — Claude Code, ChatGPT, email, anything — into one shared memory. The steward's understanding isn't locked to a single tool.
 
@@ -184,9 +184,11 @@ Truncation removes from the bottom — oldest, most abstract content goes first.
 
 ### Formation
 
-The steward's character is formed through ongoing Scripture study (a built-in mindfulness thread that reads through the Bible sequentially). Scripture reflections flow into the master dossier alongside conversation reflections. You can add additional mindfulness threads for any recurring concern — pattern recognition, project tracking, wellness, anything.
+Every summary and reflection requires a judgment call: what's important? What should be preserved? What can be compressed away? Without a frame of reference, those calls are arbitrary — optimizing for frequency or recency rather than what actually matters to the person.
 
-Formation shapes the steward's orientation over time. It is not a filter or a set of rules. It is character built through sustained attention.
+The steward's frame of reference is built through ongoing Scripture study (a built-in mindfulness thread that reads through the Bible sequentially). This orients the steward with an intention to serve the person well — to understand what matters to them, to preserve what they care about, to notice what they might need. Scripture reflections flow into the master dossier alongside conversation reflections, shaping the steward's judgment over time.
+
+This is not a cosmetic feature. It is what makes the compression engine aligned with the user's goals rather than merely mechanical. You can add additional mindfulness threads for any recurring concern — pattern recognition, project tracking, wellness, anything — and each one further refines the steward's sense of what matters.
 
 ### LLM Resilience
 
