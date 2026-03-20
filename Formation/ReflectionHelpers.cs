@@ -13,7 +13,7 @@ public static class ReflectionConstants
     public const int ReflectionTargetWords = 400;
     public const int DossierTargetWords = 500;
     public const int MinEntriesForReflection = 2;
-    public const int MaxReflectionLevel = 12;
+    public const int MaxReflectionLevel = 30; // Effectively unbounded — L30 fires at ~500M L1s
     public const int ScriptureTriggerMod = 8;
     public const int ScriptureTriggerRemainder = 7;
     public const int UnreflectedL0Threshold = 10;

@@ -166,7 +166,7 @@ Higher levels build deterministically through a **binary cascade** driven by the
 - **L2** fires when L1 count is divisible by 2
 - **L3** fires when L1 count is divisible by 4
 - **L4** fires when L1 count is divisible by 8
-- And so on, up to L12
+- And so on — unbounded, depth grows logarithmically
 
 Odd levels are summaries. Even levels are reflections. Each level is built from the 2 most recent entries at the level below, with grandchild context for depth. Every reflection tracks its lineage — you can trace any insight back to the conversation that produced it.
 
