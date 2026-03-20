@@ -155,7 +155,67 @@ public class LlmService : IEmbeddingProvider
     private static bool IsTransientException(Exception ex) =>
         ex is HttpRequestException or TaskCanceledException or TimeoutException;
 
-    // Response models
+    /// <summary>
+    /// Call the LLM with tool definitions. Supports multi-turn tool-call loops.
+    /// Returns the assistant message content and any tool calls requested.
+    /// </summary>
+    public async Task<ToolCallResponse> CallWithToolsAsync(
+        List<object> messages,
+        List<object> tools,
+        double temperature = 0.4,
+        CancellationToken cancellationToken = default)
+    {
+        var payload = new Dictionary<string, object>
+        {
+            ["model"] = _config.LlmModel,
+            ["messages"] = messages,
+            ["tools"] = tools,
+            ["temperature"] = temperature,
+            ["max_tokens"] = 1500,
+        };
+
+        var json = JsonSerializer.Serialize(payload);
+
+        for (int attempt = 0; attempt <= MaxRetries; attempt++)
+        {
+            try
+            {
+                var content = new StringContent(json, Encoding.UTF8, "application/json");
+                _logger.LogDebug("Calling LLM with tools ({Model}), attempt {Attempt}...", _config.LlmModel, attempt + 1);
+                var response = await _llmClient.PostAsync("chat/completions", content, cancellationToken);
+
+                if (IsTransient(response.StatusCode) && attempt < MaxRetries)
+                {
+                    await Task.Delay(RetryDelays[attempt], cancellationToken);
+                    continue;
+                }
+
+                response.EnsureSuccessStatusCode();
+
+                var responseJson = await response.Content.ReadAsStringAsync(cancellationToken);
+                var result = JsonSerializer.Deserialize<ChatCompletionResponse>(responseJson);
+                var choice = result?.Choices?.FirstOrDefault();
+
+                return new ToolCallResponse
+                {
+                    Content = choice?.Message?.Content,
+                    ToolCalls = choice?.Message?.ToolCalls,
+                    FinishReason = choice?.FinishReason,
+                };
+            }
+            catch (Exception ex) when (attempt < MaxRetries && IsTransientException(ex))
+            {
+                _logger.LogWarning(ex, "LLM tool call failed (attempt {Attempt}), retrying...", attempt + 1);
+                await Task.Delay(RetryDelays[attempt], cancellationToken);
+            }
+        }
+
+        _logger.LogError("LLM tool call failed after all retries");
+        return new ToolCallResponse { Content = "" };
+    }
+
+    // --- Response models ---
+
     private class ChatCompletionResponse
     {
         [JsonPropertyName("choices")]
@@ -166,12 +226,18 @@ public class LlmService : IEmbeddingProvider
     {
         [JsonPropertyName("message")]
         public MessageContent? Message { get; set; }
+
+        [JsonPropertyName("finish_reason")]
+        public string? FinishReason { get; set; }
     }
 
     private class MessageContent
     {
         [JsonPropertyName("content")]
         public string? Content { get; set; }
+
+        [JsonPropertyName("tool_calls")]
+        public List<ToolCall>? ToolCalls { get; set; }
     }
 
     private class EmbeddingResponse
@@ -188,4 +254,33 @@ public class LlmService : IEmbeddingProvider
         [JsonPropertyName("embedding")]
         public float[]? Embedding { get; set; }
     }
+}
+
+public class ToolCallResponse
+{
+    public string? Content { get; set; }
+    public List<ToolCall>? ToolCalls { get; set; }
+    public string? FinishReason { get; set; }
+    public bool HasToolCalls => ToolCalls is { Count: > 0 };
+}
+
+public class ToolCall
+{
+    [JsonPropertyName("id")]
+    public string Id { get; set; } = "";
+
+    [JsonPropertyName("type")]
+    public string Type { get; set; } = "function";
+
+    [JsonPropertyName("function")]
+    public ToolCallFunction Function { get; set; } = new();
+}
+
+public class ToolCallFunction
+{
+    [JsonPropertyName("name")]
+    public string Name { get; set; } = "";
+
+    [JsonPropertyName("arguments")]
+    public string Arguments { get; set; } = "{}";
 }

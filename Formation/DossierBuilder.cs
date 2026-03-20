@@ -9,28 +9,46 @@ namespace StewardMcp.Formation;
 
 /// <summary>
 /// Builds and maintains dossiers — synthesized working memory for threads and the master view.
+/// The master thread is fed by thread dossiers as L1 entries, using the same binary MOD cascade.
 /// </summary>
 public class DossierBuilder
 {
     private readonly StewardDb _db;
     private readonly Canon _canon;
     private readonly LlmService _llm;
+    private readonly TreeBuilder _tree;
     private readonly ILogger<DossierBuilder> _logger;
 
-    public DossierBuilder(StewardDb db, Canon canon, LlmService llm, ILogger<DossierBuilder> logger)
+    public DossierBuilder(StewardDb db, Canon canon, LlmService llm, TreeBuilder tree, ILogger<DossierBuilder> logger)
     {
         _db = db;
         _canon = canon;
         _llm = llm;
+        _tree = tree;
         _logger = logger;
     }
 
     /// <summary>Rebuild a thread's dossier from its reflection tree.</summary>
     public async Task RebuildDossierAsync(string threadId)
     {
-        // Single query: latest reflection at each level
+        // Get uncovered reflections at each level for richer context
+        var contextEntries = new List<JournalEvent>();
+        for (int level = 1; level <= MaxReflectionLevel; level++)
+        {
+            var uncovered = await _db.GetUncoveredReflectionsAsync(threadId, level);
+            if (uncovered.Count == 0) break;
+            contextEntries.AddRange(uncovered);
+        }
+
+        // Also include latest per level for full coverage
         var latest = await _db.GetLatestReflectionPerLevelAsync(threadId);
-        if (latest.Count == 0)
+        foreach (var entry in latest)
+        {
+            if (!contextEntries.Any(e => e.Id == entry.Id))
+                contextEntries.Add(entry);
+        }
+
+        if (contextEntries.Count == 0)
         {
             await _db.UpsertThreadProfileAsync(threadId, new ThreadProfile
             {
@@ -42,15 +60,18 @@ public class DossierBuilder
             return;
         }
 
-        // Build context: master dossier + previous thread dossier + latest per level
+        // Build context: master dossier + previous thread dossier + reflection entries
         var contextParts = new List<string>();
 
-        // Master dossier (cross-thread awareness)
-        var masterProfile = await _db.GetThreadProfileAsync(ReflectionConstants.MasterThreadId);
-        if (masterProfile?.Summary != null && !masterProfile.Summary.Contains("no reflections yet"))
+        // Master dossier (cross-thread awareness) — skip if we're rebuilding master itself
+        if (threadId != MasterThreadId)
         {
-            var s = masterProfile.Summary.Length > 400 ? masterProfile.Summary[..400] : masterProfile.Summary;
-            contextParts.Add($"MASTER DOSSIER (cross-thread awareness):\n{s}");
+            var masterProfile = await _db.GetThreadProfileAsync(MasterThreadId);
+            if (masterProfile?.Summary != null && !masterProfile.Summary.Contains("no reflections yet"))
+            {
+                var s = masterProfile.Summary.Length > 400 ? masterProfile.Summary[..400] : masterProfile.Summary;
+                contextParts.Add($"MASTER DOSSIER (cross-thread awareness):\n{s}");
+            }
         }
 
         // Previous thread dossier (continuity)
@@ -61,23 +82,20 @@ public class DossierBuilder
             contextParts.Add($"PREVIOUS THREAD DOSSIER:\n{s}");
         }
 
-        // Latest entry at each level
-        var samples = latest.Select(e =>
+        // Reflection entries — most recent first, labeled with level and date
+        var sortedEntries = contextEntries.OrderByDescending(e => e.Ts).ToList();
+        var entryBlocks = sortedEntries.Select(e =>
         {
             var payloadDict = ParsePayload(e.PayloadJson);
-            return (object)new
-            {
-                level = e.Level,
-                ts = e.Ts,
-                summary = GetString(payloadDict, "summary"),
-            };
+            var summary = GetString(payloadDict, "summary");
+            var date = DateTimeOffset.FromUnixTimeSeconds((long)e.Ts).ToString("MMM d, yyyy");
+            return $"[L{e.Level} | {date}] {summary}";
         }).ToList();
-        var samplesJson = JsonSerializer.Serialize(samples, new JsonSerializerOptions { WriteIndented = true });
-        contextParts.Add($"LATEST REFLECTIONS (one per level):\n{samplesJson}");
+        contextParts.Add($"REFLECTIONS (most recent first):\n" + string.Join("\n\n", entryBlocks));
 
         var seed = _canon.GetSeedContext();
 
-        var systemPrompt = $"You are Avaniel's dossier builder.\n\nORIENTATION:\n{seed}\n\nYOUR TASK: Update the working memory for this conversation thread. Use the master dossier for cross-thread awareness, the previous dossier for continuity, and the latest reflections for current state. What is the current focus? What are the most important things right now? What details need to stay in context? What concerns or questions remain? How can you best help your user? Keep under {DossierTargetWords} words. Attribute clearly: what user said vs what you inferred. Don't exaggerate. Don't lie." + JsonOutputFormat;
+        var systemPrompt = $"You are Avaniel's dossier builder.\n\nORIENTATION:\n{seed}\n\nYOUR TASK: Update the working memory for this conversation thread. Use the master dossier for cross-thread awareness, the previous dossier for continuity, and the reflections for current state. Focus on what the user has expressed — their intent, preferences, decisions, and concerns. Note substantive content and information exchanged. What is the current focus? What are the most important things right now? What details need to stay in context? What concerns or questions remain? How can you best help your user? Keep under {DossierTargetWords} words. Attribute clearly: what user said vs what you inferred. Don't exaggerate. Don't lie." + JsonOutputFormat;
 
         var userPrompt = $"""
             Thread: {threadId}
@@ -103,70 +121,57 @@ public class DossierBuilder
         _logger.LogInformation("Rebuilt dossier for thread {Thread}", threadId);
     }
 
-    /// <summary>Rebuild the master dossier from all thread dossiers + Scripture.</summary>
-    public async Task RebuildMasterDossierAsync()
+    /// <summary>
+    /// Feed a thread's dossier into the master thread as an L1 entry.
+    /// The master thread uses the same binary MOD cascade to build its own reflection tree.
+    /// </summary>
+    public async Task FeedDossierToMasterAsync(string threadId)
     {
-        var allThreadIds = await _db.GetAllThreadIdsAsync();
-        var userDossiers = new List<ThreadProfile>();
+        // Don't feed master into itself
+        if (threadId == MasterThreadId) return;
 
-        foreach (var tid in allThreadIds)
+        var profile = await _db.GetThreadProfileAsync(threadId);
+        if (profile?.Summary == null || profile.Summary.Contains("no reflections yet"))
+            return;
+
+        // Serialize the dossier as content for the master thread's L1
+        var parts = new List<string>();
+        parts.Add($"Thread: {threadId}");
+        parts.Add($"Summary: {profile.Summary}");
+        if (profile.KeyPoints?.Count > 0)
+            parts.Add($"Key points: {string.Join("; ", profile.KeyPoints)}");
+        if (profile.Tags?.Count > 0)
+            parts.Add($"Tags: {string.Join(", ", profile.Tags)}");
+        if (profile.OpenLoops?.Count > 0)
+            parts.Add($"Open loops: {string.Join("; ", profile.OpenLoops)}");
+
+        var contentText = string.Join("\n", parts);
+
+        // Insert directly as L1 in master thread (thread dossiers are already summaries)
+        var payload = new
         {
-            var threadProfile = await _db.GetThreadProfileAsync(tid);
-            if (threadProfile == null) continue;
-            userDossiers.Add(threadProfile);
-        }
-
-        var scriptureDossier = await _db.GetThreadProfileAsync(ScriptureThreadId);
-        var seed = _canon.GetSeedContext();
-
-        var contextParts = new List<string>();
-        if (scriptureDossier?.Summary != null)
-        {
-            var sTags = scriptureDossier.Tags != null ? string.Join(", ", scriptureDossier.Tags.Take(10)) : "";
-            var sSummary = scriptureDossier.Summary.Length > 500 ? scriptureDossier.Summary[..500] : scriptureDossier.Summary;
-            contextParts.Add($"SCRIPTURE FORMATION (theological grounding):\n  Summary: {sSummary}\n  Themes: {sTags}");
-        }
-
-        var threadSummaries = new List<string>();
-        foreach (var d in userDossiers.Take(20))
-        {
-            var summary = d.Summary ?? "";
-            if (summary.Length > 300) summary = summary[..300];
-            var tags = d.Tags != null ? string.Join(", ", d.Tags.Take(5)) : "";
-            threadSummaries.Add($"[{d.ThreadId}]\n  {summary}\n  Tags: {tags}");
-        }
-        if (threadSummaries.Count > 0)
-            contextParts.Add($"USER THREADS ({threadSummaries.Count} conversations):\n" + string.Join("\n\n", threadSummaries));
-
-        var dossierContext = string.Join("\n\n", contextParts);
-
-        var systemPrompt = $"You are Avaniel's master dossier builder.\n\nORIENTATION:\n{seed}\n\nYOUR TASK: Synthesize a unified portrait from all conversation threads and reflect. What patterns emerge across them? Who is the user, and how have you been helping them? How can you be a better steward? This is to be the current overview of your whole working relationship with the user including your thoughts on how to improve it, especially in light of scriptural guidance. Include any significant questions or concerns. Keep under {DossierTargetWords} words." + JsonOutputFormat;
-
-        var userPrompt = $"""
-            Synthesize a master dossier from these thread dossiers:
-
-            {dossierContext}
-
-            Create a unified portrait that captures cross-thread patterns.
-            """;
-
-        var responseText = await _llm.CallReflectionLlmAsync(systemPrompt, userPrompt);
-        var parsed = ParseJsonMaybeFenced(responseText);
-
-        var profile = new ThreadProfile
-        {
-            ThreadId = MasterThreadId,
-            Summary = GetString(parsed, "summary"),
-            KeyPoints = GetStringList(parsed, "key_points"),
-            OpenLoops = GetStringList(parsed, "open_loops"),
-            Tags = GetStringList(parsed, "tags"),
+            summary = profile.Summary,
+            key_points = profile.KeyPoints ?? new List<string>(),
+            open_loops = profile.OpenLoops ?? new List<string>(),
+            tags = profile.Tags ?? new List<string>(),
         };
+        var meta = new { source = "thread_dossier", source_thread = threadId };
 
-        await _db.UpsertThreadProfileAsync(MasterThreadId, profile);
-        _logger.LogInformation("Rebuilt master dossier");
+        await _db.AppendJournalAsync(
+            MasterThreadId, mode: "reflection", level: 1,
+            content: contentText, payload: payload, meta: meta);
+
+        // Get master's L1 count and run binary MOD cascade
+        var masterL1Count = await _db.GetL1CountForThreadAsync(MasterThreadId);
+        _logger.LogInformation("Fed dossier from {Thread} to master (master L1 count={Count})", threadId, masterL1Count);
+
+        await _tree.BuildTreeAfterL1Async(MasterThreadId, masterL1Count);
+
+        // Rebuild master's own dossier from its tree
+        await RebuildDossierAsync(MasterThreadId);
     }
 
-    /// <summary>Assemble context for a conversation from master + thread dossiers.</summary>
+    /// <summary>Assemble light context (dossiers only) for a conversation.</summary>
     public async Task<string> BuildContextSystemPromptAsync(string threadId)
     {
         var parts = new List<string>();
@@ -218,5 +223,80 @@ public class DossierBuilder
             """);
 
         return string.Join("\n\n", parts);
+    }
+
+    /// <summary>
+    /// Assemble full context: dossiers + tree entries (recent-first, truncate oldest).
+    /// This can replace a traditional chat log — it's a compressed, graded view of the conversation.
+    /// </summary>
+    public async Task<string> BuildFullContextAsync(string threadId, int maxChars = 8000, bool includeL0 = false)
+    {
+        var sections = new List<(string label, string content)>();
+
+        // 1. Master dossier
+        if (threadId != MasterThreadId)
+        {
+            var master = await _db.GetThreadProfileAsync(MasterThreadId);
+            if (master?.Summary != null && !master.Summary.Contains("no reflections yet"))
+            {
+                var date = DateTimeOffset.FromUnixTimeSeconds((long)master.UpdatedTs).ToString("MMM d, yyyy");
+                sections.Add(($"[MASTER DOSSIER | updated {date}]", master.Summary));
+            }
+        }
+
+        // 2. Thread dossier
+        var profile = await _db.GetThreadProfileAsync(threadId);
+        if (profile?.Summary != null && !profile.Summary.Contains("no reflections yet"))
+        {
+            var date = DateTimeOffset.FromUnixTimeSeconds((long)profile.UpdatedTs).ToString("MMM d, yyyy");
+            var keyPoints = profile.KeyPoints?.Count > 0 ? "\nKey points: " + string.Join("; ", profile.KeyPoints) : "";
+            var openLoops = profile.OpenLoops?.Count > 0 ? "\nOpen loops: " + string.Join("; ", profile.OpenLoops) : "";
+            sections.Add(($"[THREAD DOSSIER | {threadId} | updated {date}]", profile.Summary + keyPoints + openLoops));
+        }
+
+        // 3. Tree entries — walk levels, most recent first, uncovered only
+        for (int level = 1; level <= MaxReflectionLevel; level++)
+        {
+            var uncovered = await _db.GetUncoveredReflectionsAsync(threadId, level);
+            if (uncovered.Count == 0 && level > 1) break; // No more levels
+
+            foreach (var entry in uncovered) // Already ordered by ts DESC
+            {
+                var payloadDict = ParsePayload(entry.PayloadJson);
+                var summary = GetString(payloadDict, "summary");
+                if (string.IsNullOrEmpty(summary)) summary = entry.Content ?? "";
+
+                var date = DateTimeOffset.FromUnixTimeSeconds((long)entry.Ts).ToString("MMM d, yyyy");
+                var levelType = level % 2 == 0 ? "reflection" : "summary";
+                sections.Add(($"[L{level} {levelType} | {date}]", summary));
+            }
+        }
+
+        // 4. Optionally include raw L0 entries
+        if (includeL0)
+        {
+            var l0s = await _db.GetThreadEventsAsync(threadId, mode: "chat", level: 0, limit: 20);
+            foreach (var entry in l0s) // Already ordered by ts DESC
+            {
+                var date = DateTimeOffset.FromUnixTimeSeconds((long)entry.Ts).ToString("MMM d HH:mm");
+                var role = entry.Role?.ToUpper() ?? "?";
+                var content = entry.Content?.Length > 500 ? entry.Content[..500] + "..." : entry.Content ?? "";
+                sections.Add(($"[L0 | {role} | {date}]", content));
+            }
+        }
+
+        // 5. Truncate from bottom (oldest/highest level) if over limit
+        var result = new List<string>();
+        int totalChars = 0;
+        foreach (var (label, content) in sections)
+        {
+            var line = $"{label}\n{content}";
+            if (totalChars + line.Length > maxChars && result.Count > 0)
+                break; // Stop adding — lose the rest (oldest/most abstract)
+            result.Add(line);
+            totalChars += line.Length;
+        }
+
+        return string.Join("\n\n", result);
     }
 }

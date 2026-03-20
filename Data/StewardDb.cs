@@ -91,12 +91,20 @@ public class StewardDb : IDisposable
                     value TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS steward_config (
+                    key   TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS mindfulness_threads (
-                    thread_id    TEXT PRIMARY KEY,
-                    name         TEXT NOT NULL,
-                    prompt       TEXT NOT NULL,
-                    probability  REAL NOT NULL DEFAULT 0.10,
-                    enabled      INTEGER NOT NULL DEFAULT 1
+                    thread_id     TEXT PRIMARY KEY,
+                    name          TEXT NOT NULL,
+                    prompt        TEXT NOT NULL,
+                    probability   REAL NOT NULL DEFAULT 0.10,
+                    enabled       INTEGER NOT NULL DEFAULT 1,
+                    source_type   TEXT,
+                    source_url    TEXT,
+                    source_config TEXT
                 );
                 """;
             cmd.ExecuteNonQuery();
@@ -456,6 +464,82 @@ public class StewardDb : IDisposable
         }
     }
 
+    /// <summary>Count L1 reflections for a thread (drives the binary MOD cascade).</summary>
+    public async Task<int> GetL1CountForThreadAsync(string threadId)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            var conn = GetConnection();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT COUNT(*) FROM journal WHERE thread_id = $thread_id AND mode = 'reflection' AND level = 1";
+            cmd.Parameters.AddWithValue("$thread_id", threadId);
+            return Convert.ToInt32(cmd.ExecuteScalar() ?? 0);
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    /// <summary>Get the N most recent reflections at a given level for a thread.</summary>
+    public async Task<List<JournalEvent>> GetLatestReflectionsAsync(string threadId, int level, int limit = 2)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            var conn = GetConnection();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+                SELECT id, ts, role, mode, level, thread_id, content, payload_json, meta_json
+                FROM journal
+                WHERE thread_id = $thread_id AND mode = 'reflection' AND level = $level
+                ORDER BY ts DESC
+                LIMIT $limit
+                """;
+            cmd.Parameters.AddWithValue("$thread_id", threadId);
+            cmd.Parameters.AddWithValue("$level", level);
+            cmd.Parameters.AddWithValue("$limit", limit);
+
+            var results = ReadEvents(cmd);
+            results.Reverse(); // Return in chronological order (oldest first)
+            return results;
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    /// <summary>Get reflections at a level that have not been consumed as sources by any higher-level reflection.</summary>
+    public async Task<List<JournalEvent>> GetUncoveredReflectionsAsync(string threadId, int level, int limit = 10)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            var conn = GetConnection();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+                SELECT j.id, j.ts, j.role, j.mode, j.level, j.thread_id, j.content, j.payload_json, j.meta_json
+                FROM journal j
+                LEFT JOIN reflection_sources rs ON rs.source_id = j.id
+                WHERE j.thread_id = $thread_id AND j.mode = 'reflection' AND j.level = $level
+                  AND rs.reflection_id IS NULL
+                ORDER BY j.ts DESC
+                LIMIT $limit
+                """;
+            cmd.Parameters.AddWithValue("$thread_id", threadId);
+            cmd.Parameters.AddWithValue("$level", level);
+            cmd.Parameters.AddWithValue("$limit", limit);
+
+            return ReadEvents(cmd);
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
     public async Task<int> GetMaxReflectionLevelAsync(string threadId)
     {
         await _lock.WaitAsync();
@@ -496,6 +580,68 @@ public class StewardDb : IDisposable
         return results;
     }
 
+    // --- Steward Config (per-user key-value) ---
+
+    public async Task<string?> GetConfigAsync(string key)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            var conn = GetConnection();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT value FROM steward_config WHERE key = $key";
+            cmd.Parameters.AddWithValue("$key", key);
+            var result = cmd.ExecuteScalar();
+            return result is DBNull || result == null ? null : (string)result;
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    public async Task SetConfigAsync(string key, string value)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            var conn = GetConnection();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+                INSERT INTO steward_config (key, value) VALUES ($key, $value)
+                ON CONFLICT(key) DO UPDATE SET value = $value
+                """;
+            cmd.Parameters.AddWithValue("$key", key);
+            cmd.Parameters.AddWithValue("$value", value);
+            cmd.ExecuteNonQuery();
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    public async Task<Dictionary<string, string>> GetConfigByPrefixAsync(string prefix)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            var conn = GetConnection();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT key, value FROM steward_config WHERE key LIKE $prefix";
+            cmd.Parameters.AddWithValue("$prefix", prefix + "%");
+            var results = new Dictionary<string, string>();
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+                results[reader.GetString(0)] = reader.GetString(1);
+            return results;
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
     // --- Mindfulness Threads ---
 
     public async Task<List<MindfulnessThread>> GetEnabledMindfulnessThreadsAsync()
@@ -505,7 +651,7 @@ public class StewardDb : IDisposable
         {
             var conn = GetConnection();
             using var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT thread_id, name, prompt, probability FROM mindfulness_threads WHERE enabled = 1";
+            cmd.CommandText = "SELECT thread_id, name, prompt, probability, source_type, source_url, source_config FROM mindfulness_threads WHERE enabled = 1";
             var results = new List<MindfulnessThread>();
             using var reader = cmd.ExecuteReader();
             while (reader.Read())
@@ -516,6 +662,9 @@ public class StewardDb : IDisposable
                     Name = reader.GetString(1),
                     Prompt = reader.GetString(2),
                     Probability = reader.GetDouble(3),
+                    SourceType = reader.IsDBNull(4) ? null : reader.GetString(4),
+                    SourceUrl = reader.IsDBNull(5) ? null : reader.GetString(5),
+                    SourceConfig = reader.IsDBNull(6) ? null : reader.GetString(6),
                 });
             }
             return results;
@@ -534,15 +683,19 @@ public class StewardDb : IDisposable
             var conn = GetConnection();
             using var cmd = conn.CreateCommand();
             cmd.CommandText = """
-                INSERT INTO mindfulness_threads (thread_id, name, prompt, probability, enabled)
-                VALUES ($thread_id, $name, $prompt, $probability, $enabled)
+                INSERT INTO mindfulness_threads (thread_id, name, prompt, probability, enabled, source_type, source_url, source_config)
+                VALUES ($thread_id, $name, $prompt, $probability, $enabled, $source_type, $source_url, $source_config)
                 ON CONFLICT(thread_id) DO UPDATE SET
-                    name = $name, prompt = $prompt, probability = $probability, enabled = $enabled
+                    name = $name, prompt = $prompt, probability = $probability, enabled = $enabled,
+                    source_type = $source_type, source_url = $source_url, source_config = $source_config
                 """;
             cmd.Parameters.AddWithValue("$thread_id", thread.ThreadId);
             cmd.Parameters.AddWithValue("$name", thread.Name);
             cmd.Parameters.AddWithValue("$prompt", thread.Prompt);
             cmd.Parameters.AddWithValue("$probability", thread.Probability);
+            cmd.Parameters.AddWithValue("$source_type", thread.SourceType != null ? (object)thread.SourceType : DBNull.Value);
+            cmd.Parameters.AddWithValue("$source_url", thread.SourceUrl != null ? (object)thread.SourceUrl : DBNull.Value);
+            cmd.Parameters.AddWithValue("$source_config", thread.SourceConfig != null ? (object)thread.SourceConfig : DBNull.Value);
             cmd.Parameters.AddWithValue("$enabled", thread.Enabled ? 1 : 0);
             cmd.ExecuteNonQuery();
         }
@@ -566,6 +719,9 @@ public class MindfulnessThread
     public string Prompt { get; set; } = "";
     public double Probability { get; set; } = 0.10;
     public bool Enabled { get; set; } = true;
+    public string? SourceType { get; set; }  // "rss", "json_api", "scrape", etc.
+    public string? SourceUrl { get; set; }
+    public string? SourceConfig { get; set; } // JSON config for the feed provider
 }
 
 public class JournalEvent

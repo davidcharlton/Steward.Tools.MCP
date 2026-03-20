@@ -11,11 +11,13 @@ public class MemoryTools
 {
     private readonly StewardDb _db;
     private readonly Scripture _scripture;
+    private readonly DossierBuilder _dossiers;
 
-    public MemoryTools(StewardDb db, Scripture scripture)
+    public MemoryTools(StewardDb db, Scripture scripture, DossierBuilder dossiers)
     {
         _db = db;
         _scripture = scripture;
+        _dossiers = dossiers;
     }
 
     [McpServerTool]
@@ -107,6 +109,25 @@ public class MemoryTools
         }).ToList();
 
         return JsonSerializer.Serialize(new { reflectionId, sourceCount = entries.Count, sources = entries });
+    }
+
+    [McpServerTool]
+    [Description("Get assembled context for a conversation. Use depth='light' for dossiers only (fast), or depth='full' for dossiers plus the reflection tree (replaces a chat log). Full context is ordered most-recent-first and truncated to fit.")]
+    public async Task<string> GetContext(
+        [Description("Thread ID")] string threadId,
+        [Description("Context depth: 'light' for dossiers only, 'full' for dossiers + reflection tree")] string depth = "light",
+        [Description("Include raw L0 chat entries in full context (default false)")] bool includeL0 = false)
+    {
+        if (depth == "full")
+        {
+            var context = await _dossiers.BuildFullContextAsync(threadId, includeL0: includeL0);
+            return JsonSerializer.Serialize(new { threadId, depth, context });
+        }
+        else
+        {
+            var context = await _dossiers.BuildContextSystemPromptAsync(threadId);
+            return JsonSerializer.Serialize(new { threadId, depth = "light", context });
+        }
     }
 
     [McpServerTool]

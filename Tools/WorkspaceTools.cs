@@ -5,7 +5,8 @@ using StewardMcp.Services;
 
 namespace StewardMcp.Tools;
 
-[McpServerToolType]
+// Workspace tools removed from MCP surface — kept for platform use.
+// [McpServerToolType]
 public class WorkspaceTools
 {
     private readonly WorkspaceService _ws;

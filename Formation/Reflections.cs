@@ -5,8 +5,8 @@ using static StewardMcp.Formation.ReflectionConstants;
 namespace StewardMcp.Formation;
 
 /// <summary>
-/// Orchestrates the reflection pipeline: debouncing, L1 creation, tree building,
-/// dossier rebuild, and mindfulness thread triggers.
+/// Orchestrates the reflection pipeline: debouncing, L1 creation, binary MOD cascade,
+/// dossier rebuild, master feed, and deterministic Scripture triggers.
 /// </summary>
 public class ReflectionPipeline
 {
@@ -48,7 +48,13 @@ public class ReflectionPipeline
         }
 
         var l0Events = await _db.GetUnreflectedL0sAsync(threadId);
-        if (l0Events.Count < MinEntriesForReflection || l0Events[^1].Role != "assistant")
+
+        // Trigger if: (a) normal rule — 2+ L0s and last is assistant, or
+        //             (b) threshold fallback — unreflected L0s hit the cap regardless of role
+        var normalTrigger = l0Events.Count >= MinEntriesForReflection && l0Events[^1].Role == "assistant";
+        var thresholdTrigger = l0Events.Count >= UnreflectedL0Threshold;
+
+        if (!normalTrigger && !thresholdTrigger)
         {
             lock (_triggerLock) { _inflight.Remove(threadId); }
             return null;
@@ -63,10 +69,13 @@ public class ReflectionPipeline
         lock (_triggerLock) { _inflight.Remove(threadId); }
     }
 
+    /// <summary>Event raised when Scripture study should fire. Args: l1Count.</summary>
+    public event Func<string, int, Task>? OnScriptureTriggered;
+
     /// <summary>
-    /// Main reflection pipeline: L1 → higher levels → dossier → mindfulness triggers.
+    /// Main reflection pipeline: L1 → binary MOD cascade → dossier → master feed → Scripture trigger.
     /// </summary>
-    public async Task<ReflectionResult> RunReflectionsAsync(string threadId, List<JournalEvent>? prefetchedL0 = null)
+    public async Task<ReflectionResult> RunReflectionsAsync(string threadId, List<JournalEvent>? prefetchedL0 = null, bool isMindfulness = false)
     {
         var l0Events = prefetchedL0 ?? await _db.GetUnreflectedL0sAsync(threadId);
         if (l0Events.Count < MinEntriesForReflection)
@@ -77,49 +86,49 @@ public class ReflectionPipeline
 
         try
         {
-            var l1Id = await _tree.CreateL1WithLineageAsync(threadId, l0Events);
-            _logger.LogInformation("Created L1 #{Id} for thread {Thread}", l1Id, threadId);
+            // 1. Create L1 summary — returns null if LLM is unavailable
+            var result = await _tree.CreateL1WithLineageAsync(threadId, l0Events);
+            if (result is null)
+            {
+                _logger.LogWarning("L1 creation failed for thread {Thread} — L0s remain unreflected for next cycle", threadId);
+                return new ReflectionResult { ThreadId = threadId, Status = "llm_unavailable" };
+            }
 
-            await _tree.BuildHigherLevelsAsync(threadId);
+            var (l1Id, l1Count) = result.Value;
+            _logger.LogInformation("Created L1 #{Id} for thread {Thread} (L1 count={Count})", l1Id, threadId, l1Count);
+
+            // 2. Binary MOD cascade — deterministic higher levels
+            await _tree.BuildTreeAfterL1Async(threadId, l1Count);
+
+            // 3. Rebuild thread dossier
             await _dossiers.RebuildDossierAsync(threadId);
-            await _dossiers.RebuildMasterDossierAsync();
 
-            // Mindfulness triggers: check enabled threads, fire probabilistically
-            await TriggerMindfulnessAsync(threadId);
+            // 4. Feed thread dossier to master thread as L1
+            await _dossiers.FeedDossierToMasterAsync(threadId);
+
+            // 5. Scripture trigger — deterministic, only from user conversations
+            if (!isMindfulness && threadId != ScriptureThreadId && l1Count % ScriptureTriggerMod == ScriptureTriggerRemainder)
+            {
+                _logger.LogInformation("Scripture trigger at L1 count {Count} for thread {Thread}", l1Count, threadId);
+                if (OnScriptureTriggered != null)
+                {
+                    try { await OnScriptureTriggered(threadId, l1Count); }
+                    catch (Exception ex) { _logger.LogWarning(ex, "Scripture study failed"); }
+                }
+            }
 
             return new ReflectionResult
             {
                 ThreadId = threadId,
                 Status = "completed",
                 L1Id = l1Id,
+                L1Count = l1Count,
             };
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Reflection pipeline failed for thread {Thread}", threadId);
             return new ReflectionResult { ThreadId = threadId, Status = "error", Error = ex.Message };
-        }
-    }
-
-    /// <summary>Event raised when a mindfulness thread should fire. Args: thread_id, prompt.</summary>
-    public event Func<MindfulnessThread, Task>? OnMindfulnessTriggered;
-
-    private async Task TriggerMindfulnessAsync(string sourceThreadId)
-    {
-        if (OnMindfulnessTriggered == null) return;
-
-        var threads = await _db.GetEnabledMindfulnessThreadsAsync();
-        foreach (var mt in threads)
-        {
-            // Don't trigger a mindfulness thread from its own reflection cycle
-            if (mt.ThreadId == sourceThreadId) continue;
-
-            if (Random.Shared.NextDouble() < mt.Probability)
-            {
-                _logger.LogInformation("Triggering mindfulness thread '{Name}' ({ThreadId})", mt.Name, mt.ThreadId);
-                try { await OnMindfulnessTriggered(mt); }
-                catch (Exception ex) { _logger.LogWarning(ex, "Mindfulness thread '{Name}' failed", mt.Name); }
-            }
         }
     }
 }

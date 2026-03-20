@@ -76,7 +76,7 @@ public class Scripture
             meta: new { scripture_ref = reference.Reference });
 
         // Run reflections (creates L1 Scripture reflection, rebuilds dossiers including master)
-        await _pipeline.RunReflectionsAsync(ReflectionConstants.ScriptureThreadId);
+        await _pipeline.RunReflectionsAsync(ReflectionConstants.ScriptureThreadId, isMindfulness: true);
         _logger.LogInformation("Scripture study complete: {Reference}", reference.Reference);
     }
 

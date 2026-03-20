@@ -13,6 +13,10 @@ public static class ReflectionConstants
     public const int ReflectionTargetWords = 400;
     public const int DossierTargetWords = 500;
     public const int MinEntriesForReflection = 2;
+    public const int MaxReflectionLevel = 12;
+    public const int ScriptureTriggerMod = 8;
+    public const int ScriptureTriggerRemainder = 7;
+    public const int UnreflectedL0Threshold = 10;
 
     public const string JsonOutputFormat = """
 
@@ -93,5 +97,6 @@ public class ReflectionResult
     public string ThreadId { get; set; } = "";
     public string Status { get; set; } = "";
     public long? L1Id { get; set; }
+    public int? L1Count { get; set; }
     public string? Error { get; set; }
 }

@@ -78,11 +78,11 @@ public class VectorStore : IDisposable
             _disabled = false;
             _logger.LogInformation("Vector store schema initialized");
         }
-        catch (DuckDBException ex)
+        catch (Exception ex) when (ex is DuckDBException || ex is TypeInitializationException || ex is DllNotFoundException)
         {
             _disabled = true;
             _logger.LogError(ex, "Failed to initialize DuckDB — vector search disabled. " +
-                "This usually means another Steward process holds the lock on {Path}", _config.DuckDbPath);
+                "Path: {Path}. On Alpine/musl, DuckDB native binaries may not be available.", _config.DuckDbPath);
         }
         finally
         {
