@@ -1,5 +1,9 @@
 # Steward.Tools.MCP
 
+[![Build](https://github.com/davidcharlton/Steward.Tools.MCP/actions/workflows/build.yml/badge.svg)](https://github.com/davidcharlton/Steward.Tools.MCP/actions/workflows/build.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![.NET 10](https://img.shields.io/badge/.NET-10.0-purple.svg)](https://dotnet.microsoft.com/download/dotnet/10.0)
+
 A personal AI steward with persistent memory, hierarchical reflection, and character formation. Runs as an [MCP](https://modelcontextprotocol.io/) server — plug it into Claude, Claude Code, or any MCP-compatible host.
 
 Your steward journals your conversations, compresses them into a reflection tree, builds living dossiers of who you are and what you care about, and carries that understanding across sessions and systems. It doesn't just remember — it reflects.
