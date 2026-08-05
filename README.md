@@ -1,5 +1,7 @@
 # Steward.Tools.MCP
 
+> _Published mirror of `steward/steward-mcp` — the public, MIT-licensed snapshot of the engine; canonical development happens upstream in the `steward` monorepo._
+
 [![Build](https://github.com/davidcharlton/Steward.Tools.MCP/actions/workflows/build.yml/badge.svg)](https://github.com/davidcharlton/Steward.Tools.MCP/actions/workflows/build.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![.NET 10](https://img.shields.io/badge/.NET-10.0-purple.svg)](https://dotnet.microsoft.com/download/dotnet/10.0)
