@@ -62,7 +62,8 @@ public class StewardDb : IDisposable
                     level        INTEGER NOT NULL DEFAULT 0,
                     content      TEXT,
                     payload_json TEXT,
-                    meta_json    TEXT
+                    meta_json    TEXT,
+                    external_id  TEXT
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_journal_thread_ts
@@ -109,14 +110,50 @@ public class StewardDb : IDisposable
                 """;
             cmd.ExecuteNonQuery();
 
+            // Migrate existing v3 databases: add external_id column if missing.
+            // Must happen BEFORE creating the unique index on (thread_id, external_id),
+            // because for pre-existing tables the column doesn't exist yet.
+            using var pragmaCmd = conn.CreateCommand();
+            pragmaCmd.CommandText = "PRAGMA table_info(journal)";
+            var hasExternalId = false;
+            using (var reader = pragmaCmd.ExecuteReader())
+            {
+                while (reader.Read())
+                {
+                    if (reader.GetString(1) == "external_id")
+                    {
+                        hasExternalId = true;
+                        break;
+                    }
+                }
+            }
+            if (!hasExternalId)
+            {
+                using var alterCmd = conn.CreateCommand();
+                alterCmd.CommandText = "ALTER TABLE journal ADD COLUMN external_id TEXT";
+                alterCmd.ExecuteNonQuery();
+                _logger.LogInformation("Migrated journal table: added external_id column");
+            }
+
+            // Create the unique partial index after the column is guaranteed to exist
+            // (either from fresh CREATE TABLE above or from the ALTER migration).
+            using var idxCmd = conn.CreateCommand();
+            idxCmd.CommandText = """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_journal_external_id
+                ON journal(thread_id, external_id)
+                WHERE external_id IS NOT NULL
+                """;
+            idxCmd.ExecuteNonQuery();
+
             // Schema versioning
             using var verCmd = conn.CreateCommand();
             verCmd.CommandText = """
-                INSERT OR IGNORE INTO global_state (key, value) VALUES ('schema_version', '3')
+                INSERT INTO global_state (key, value) VALUES ('schema_version', '4')
+                ON CONFLICT(key) DO UPDATE SET value = '4'
                 """;
             verCmd.ExecuteNonQuery();
 
-            _logger.LogInformation("Database schema initialized (v3)");
+            _logger.LogInformation("Database schema initialized (v4)");
         }
         finally
         {
@@ -131,7 +168,8 @@ public class StewardDb : IDisposable
         string content,
         string? role = null,
         object? payload = null,
-        object? meta = null)
+        object? meta = null,
+        string? externalId = null)
     {
         await _lock.WaitAsync();
         try
@@ -140,8 +178,8 @@ public class StewardDb : IDisposable
             using var cmd = conn.CreateCommand();
             var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
             cmd.CommandText = """
-                INSERT INTO journal (ts, thread_id, role, mode, level, content, payload_json, meta_json)
-                VALUES ($ts, $thread_id, $role, $mode, $level, $content, $payload_json, $meta_json)
+                INSERT INTO journal (ts, thread_id, role, mode, level, content, payload_json, meta_json, external_id)
+                VALUES ($ts, $thread_id, $role, $mode, $level, $content, $payload_json, $meta_json, $external_id)
                 """;
             cmd.Parameters.AddWithValue("$ts", now);
             cmd.Parameters.AddWithValue("$thread_id", threadId);
@@ -151,6 +189,7 @@ public class StewardDb : IDisposable
             cmd.Parameters.AddWithValue("$content", content);
             cmd.Parameters.AddWithValue("$payload_json", payload != null ? JsonSerializer.Serialize(payload) : (object)DBNull.Value);
             cmd.Parameters.AddWithValue("$meta_json", meta != null ? JsonSerializer.Serialize(meta) : (object)DBNull.Value);
+            cmd.Parameters.AddWithValue("$external_id", externalId != null ? (object)externalId : DBNull.Value);
             cmd.ExecuteNonQuery();
 
             // Get last inserted ID
@@ -158,6 +197,31 @@ public class StewardDb : IDisposable
             idCmd.CommandText = "SELECT last_insert_rowid()";
             var id = (long)idCmd.ExecuteScalar()!;
             return id;
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    public async Task<long?> FindJournalByExternalIdAsync(string threadId, string externalId)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            var conn = GetConnection();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+                SELECT id FROM journal
+                WHERE thread_id = $thread_id AND external_id = $external_id
+                LIMIT 1
+                """;
+            cmd.Parameters.AddWithValue("$thread_id", threadId);
+            cmd.Parameters.AddWithValue("$external_id", externalId);
+            var result = cmd.ExecuteScalar();
+            if (result == null || result == DBNull.Value)
+                return null;
+            return (long)result;
         }
         finally
         {
@@ -249,6 +313,60 @@ public class StewardDb : IDisposable
             cmd.Parameters.AddWithValue("$profile_json", json);
             cmd.Parameters.AddWithValue("$updated_ts", now);
             cmd.ExecuteNonQuery();
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    public async Task<List<ThreadSummary>> ListThreadsAsync()
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            var conn = GetConnection();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+                SELECT
+                    j.thread_id,
+                    MIN(j.ts) AS first_ts,
+                    MAX(j.ts) AS last_ts,
+                    SUM(CASE WHEN j.mode = 'chat' AND j.level = 0 THEN 1 ELSE 0 END) AS l0_count,
+                    SUM(CASE WHEN j.mode = 'reflection' AND j.level = 1 THEN 1 ELSE 0 END) AS l1_count,
+                    tp.profile_json
+                FROM journal j
+                LEFT JOIN thread_profiles tp ON tp.thread_id = j.thread_id
+                GROUP BY j.thread_id
+                ORDER BY last_ts DESC
+                """;
+
+            var results = new List<ThreadSummary>();
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                string? summary = null;
+                if (!reader.IsDBNull(5))
+                {
+                    try
+                    {
+                        var profile = JsonSerializer.Deserialize<ThreadProfile>(reader.GetString(5));
+                        summary = profile?.Summary;
+                    }
+                    catch { }
+                }
+
+                results.Add(new ThreadSummary
+                {
+                    ThreadId = reader.GetString(0),
+                    FirstTs = reader.GetDouble(1),
+                    LastTs = reader.GetDouble(2),
+                    L0Count = reader.GetInt64(3),
+                    L1Count = reader.GetInt64(4),
+                    DossierSummary = summary,
+                });
+            }
+            return results;
         }
         finally
         {
@@ -745,4 +863,14 @@ public class ThreadProfile
     public List<string>? KeyPoints { get; set; }
     public List<string>? OpenLoops { get; set; }
     public List<string>? Tags { get; set; }
+}
+
+public class ThreadSummary
+{
+    public string ThreadId { get; set; } = "";
+    public double FirstTs { get; set; }
+    public double LastTs { get; set; }
+    public long L0Count { get; set; }
+    public long L1Count { get; set; }
+    public string? DossierSummary { get; set; }
 }

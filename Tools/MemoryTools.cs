@@ -3,6 +3,7 @@ using System.Text.Json;
 using ModelContextProtocol.Server;
 using StewardMcp.Data;
 using StewardMcp.Formation;
+using StewardMcp.Services;
 
 namespace StewardMcp.Tools;
 
@@ -13,11 +14,53 @@ public class MemoryTools
     private readonly Scripture _scripture;
     private readonly DossierBuilder _dossiers;
 
-    public MemoryTools(StewardDb db, Scripture scripture, DossierBuilder dossiers)
+    public MemoryTools(UserSteward user)
     {
-        _db = db;
-        _scripture = scripture;
-        _dossiers = dossiers;
+        _db = user.Db;
+        _scripture = user.Scripture;
+        _dossiers = user.Dossiers;
+    }
+
+    [McpServerTool]
+    [Description("List all threads in the steward's memory with activity stats. Returns thread_id, first/last write timestamps, L0 message count, L1 reflection count, and a short dossier summary if available — ordered most-recent-activity first. Use this before importing history (via checkpoint_summary) to see what buckets exist and where your data should land.")]
+    public async Task<string> MemoryListThreads()
+    {
+        var threads = await _db.ListThreadsAsync();
+        return JsonSerializer.Serialize(new
+        {
+            count = threads.Count,
+            threads = threads.Select(t => new
+            {
+                threadId = t.ThreadId,
+                firstTs = t.FirstTs,
+                lastTs = t.LastTs,
+                l0Count = t.L0Count,
+                l1Count = t.L1Count,
+                dossierSummary = t.DossierSummary != null && t.DossierSummary.Length > 200
+                    ? t.DossierSummary[..200] + "..."
+                    : t.DossierSummary,
+            }).ToList(),
+        });
+    }
+
+    [McpServerTool]
+    [Description("Resolve a canonical thread_id from a host-context string. Call this once at session open with whatever stable identifier your host provides — Claude Code passes a git repo root path, ChatGPT could pass a project name, email could pass a subject-line hash. The Steward slugifies the final path segment (lowercase, '.' → '-') and returns the thread_id to use for all subsequent tool calls. Pass empty or omit for 'general'.")]
+    public string ResolveThread(
+        [Description("Stable host-context identifier. For Claude Code, the git repo root path (e.g., 'C:\\\\code\\\\steward'). For other hosts, any stable string. Empty string or omitted returns 'general'.")] string? context = null)
+    {
+        if (string.IsNullOrWhiteSpace(context))
+            return JsonSerializer.Serialize(new { threadId = "general", source = "no_input" });
+
+        var normalized = context.Replace('\\', '/').TrimEnd('/');
+        var lastSlash = normalized.LastIndexOf('/');
+        var basename = lastSlash >= 0 ? normalized.Substring(lastSlash + 1) : normalized;
+
+        // Drive letters ("C:") or empty basename → workspace root, use general
+        if (string.IsNullOrWhiteSpace(basename) || (basename.Length == 2 && basename[1] == ':'))
+            return JsonSerializer.Serialize(new { threadId = "general", source = "root_path", input = context });
+
+        var threadId = basename.ToLowerInvariant().Replace('.', '-');
+        return JsonSerializer.Serialize(new { threadId, source = "basename_slug", input = context });
     }
 
     [McpServerTool]

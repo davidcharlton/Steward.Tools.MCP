@@ -44,6 +44,23 @@ builder.Services.AddSingleton<ReflectionPipeline>();
 builder.Services.AddSingleton<Scripture>();
 builder.Services.AddSingleton<MindfulnessHandler>();
 
+// Single-user stdio: tool classes take UserSteward; compose it from the
+// singletons above. (HTTP multi-user builds a UserSteward per request from
+// the UserStewardFactory cache — see steward-api/Program.cs.)
+builder.Services.AddSingleton<StewardMcp.Services.UserSteward>(sp => new StewardMcp.Services.UserSteward
+{
+    UserId = "local",
+    Config = sp.GetRequiredService<StewardConfig>(),
+    Db = sp.GetRequiredService<StewardDb>(),
+    Vectors = sp.GetRequiredService<VectorStore>(),
+    Pipeline = sp.GetRequiredService<ReflectionPipeline>(),
+    Tree = sp.GetRequiredService<TreeBuilder>(),
+    Dossiers = sp.GetRequiredService<DossierBuilder>(),
+    Scripture = sp.GetRequiredService<Scripture>(),
+    Canon = sp.GetRequiredService<Canon>(),
+    Llm = sp.GetRequiredService<LlmService>(),
+});
+
 // MCP Server
 builder.Services
     .AddMcpServer(options =>

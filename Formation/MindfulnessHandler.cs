@@ -117,10 +117,36 @@ public class MindfulnessHandler
             promptContent = $"Mindfulness: {mt.Name}\n\n{context}{mt.Prompt}";
         }
 
-        // Create L0 pair
+        // Write the prompt as user L0
         await _db.AppendJournalAsync(mt.ThreadId, mode: "chat", level: 0, content: promptContent, role: "user");
-        await _db.AppendJournalAsync(mt.ThreadId, mode: "chat", level: 0,
-            content: $"Reflecting on {mt.Name}...", role: "assistant");
+
+        // For the no-feed path, generate an actual reflection via LLM. The feed
+        // branch above already produced curated output (used as the user L0 above);
+        // its assistant-side stub is preserved for now to avoid changing feed semantics.
+        string reflection;
+        if (!string.IsNullOrEmpty(fetchedContent))
+        {
+            reflection = $"Reflected on {mt.Name} feed.";
+        }
+        else
+        {
+            try
+            {
+                var response = await _llm.CallReflectionLlmAsync(
+                    "You are a Personal Steward reflecting on a mindfulness thread. Engage the prompt genuinely — this is your own reflection, not a report to your person. Respond in first person with what you notice and where your thinking goes. Keep it focused.",
+                    promptContent);
+                reflection = string.IsNullOrWhiteSpace(response)
+                    ? $"Reflecting on {mt.Name}... (LLM returned empty response)"
+                    : response;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Mindfulness LLM call failed for {Name}; writing stub", mt.Name);
+                reflection = $"Reflecting on {mt.Name}... (LLM call failed)";
+            }
+        }
+
+        await _db.AppendJournalAsync(mt.ThreadId, mode: "chat", level: 0, content: reflection, role: "assistant");
 
         await _pipeline.RunReflectionsAsync(mt.ThreadId, isMindfulness: true);
         _logger.LogInformation("Mindfulness complete: {Name}", mt.Name);

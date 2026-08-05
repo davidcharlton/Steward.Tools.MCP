@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Text.Json;
 using ModelContextProtocol.Server;
 using StewardMcp.Data;
+using StewardMcp.Services;
 
 namespace StewardMcp.Tools;
 
@@ -10,9 +11,9 @@ public class MindfulnessTools
 {
     private readonly StewardDb _db;
 
-    public MindfulnessTools(StewardDb db)
+    public MindfulnessTools(UserSteward user)
     {
-        _db = db;
+        _db = user.Db;
     }
 
     [McpServerTool]

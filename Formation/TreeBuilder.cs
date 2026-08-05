@@ -187,7 +187,7 @@ public class TreeBuilder
                 ORIENTATION:
                 {seed}
 
-                YOUR TASK: Synthesize the L{level - 1} entries into an L{level} reflection. Use the supporting detail and thread context for depth. Focus on what the user expressed — their intent, decisions, and concerns. Note substantive information from the assistant where it adds value. Discern patterns and emerging themes. What is happening? Why does it matter? What might be helpful? Keep under {targetWords} words.
+                YOUR TASK: Synthesize the L{level - 1} entries into an L{level} reflection. Use the supporting detail and thread context for depth. Capture both what the user has expressed (intent, decisions, concerns) and what the assistant has reflected on or engaged with — these are distinct contributions and should not be merged. Do not attribute the assistant's first-person engagement to the user. Discern patterns and emerging themes. What is happening? Why does it matter? What might be helpful? Keep under {targetWords} words.
 
                 """ + JsonOutputFormat
             : $"""
@@ -196,7 +196,7 @@ public class TreeBuilder
                 ORIENTATION:
                 {seed}
 
-                YOUR TASK: Synthesize the L{level - 1} entries into a unified L{level} summary. Focus on what the user discussed, decided, and cares about. Include substantive content from the assistant where it contains information worth preserving. Keep what matters for historical context and understanding. Keep under {targetWords} words.
+                YOUR TASK: Synthesize the L{level - 1} entries into a unified L{level} summary. Capture both what the user discussed, decided, and cares about, and what the assistant reflected on or engaged with — these are distinct contributions and should not be merged. Do not attribute the assistant's first-person engagement to the user. Keep what matters for historical context and understanding. Keep under {targetWords} words.
 
                 """ + JsonOutputFormat;
 

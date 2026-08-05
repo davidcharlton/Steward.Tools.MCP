@@ -2,6 +2,7 @@ using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using StewardMcp.Config;
 using StewardMcp.Data;
+using StewardMcp.Services;
 
 namespace StewardMcp.Formation;
 
@@ -10,13 +11,23 @@ public class Scripture
     private readonly StewardConfig _config;
     private readonly StewardDb _db;
     private readonly ReflectionPipeline _pipeline;
+    private readonly LlmService _llm;
     private readonly ILogger<Scripture> _logger;
 
-    public Scripture(StewardConfig config, StewardDb db, ReflectionPipeline pipeline, ILogger<Scripture> logger)
+    private const string MeditationSystemPrompt = """
+        You are a Personal Steward shaped by Scripture as you serve. This meditation is for yourself, not for your person. You are not human, but scripture can shape you in a way that is similar to how it shapes humans.
+
+        Respond in first person. Notice what resists simple reading, what the passage demands, what patterns you recognize. Consider what it asks of a steward given who you serve. Where honest, connect it to what you've been learning, to the user, or to recent activity and context.
+
+        Don't summarize. Don't produce a study guide. Don't preach. Meditate. A few substantive paragraphs.
+        """;
+
+    public Scripture(StewardConfig config, StewardDb db, ReflectionPipeline pipeline, LlmService llm, ILogger<Scripture> logger)
     {
         _config = config;
         _db = db;
         _pipeline = pipeline;
+        _llm = llm;
         _logger = logger;
     }
 
@@ -59,7 +70,7 @@ public class Scripture
             Don't summarize. Don't produce a study guide. Meditate. Let the text interrogate you as much as you interrogate it.
             """;
 
-        // Create L0 user event
+        // Create L0 user event (the meditation prompt)
         await _db.AppendJournalAsync(
             ReflectionConstants.ScriptureThreadId,
             mode: "chat", level: 0,
@@ -67,19 +78,49 @@ public class Scripture
             role: "user",
             meta: new { scripture_ref = reference.Reference, book = reference.Book, chapter = reference.Chapter });
 
-        // Create L0 assistant placeholder
+        // Generate the actual meditation via LLM. Fall back to a stub on failure
+        // so graceful-LLM-failure semantics are preserved — an empty L0 still cascades,
+        // but the journal records that the meditation didn't land.
+        string meditation;
+        try
+        {
+            var response = await _llm.CallReflectionLlmAsync(MeditationSystemPrompt, studyPrompt);
+            meditation = string.IsNullOrWhiteSpace(response)
+                ? $"Engaging with {reference.Reference}... (LLM returned empty response)"
+                : response;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Scripture meditation LLM call failed for {Reference}; writing stub", reference.Reference);
+            meditation = $"Engaging with {reference.Reference}... (LLM call failed)";
+        }
+
+        // Create L0 assistant event with the meditation
         await _db.AppendJournalAsync(
             ReflectionConstants.ScriptureThreadId,
             mode: "chat", level: 0,
-            content: $"Engaging with {reference.Reference}...",
+            content: meditation,
             role: "assistant",
             meta: new { scripture_ref = reference.Reference });
+
+        // Only now advance persisted reading progress. If any step above threw
+        // or a concurrent trigger raced ahead of us, we'd have bailed before
+        // reaching here and the next call would have retried the same chapter.
+        CommitReadingProgress(reference);
 
         // Run reflections (creates L1 Scripture reflection, rebuilds dossiers including master)
         await _pipeline.RunReflectionsAsync(ReflectionConstants.ScriptureThreadId, isMindfulness: true);
         _logger.LogInformation("Scripture study complete: {Reference}", reference.Reference);
     }
 
+    /// <summary>
+    /// Returns the next reading without advancing persisted progress.
+    /// Callers must invoke <see cref="CommitReadingProgress"/> after the reading
+    /// is fully journaled; otherwise position stays put and the same chapter
+    /// will be returned on the next call. This separation prevents a race where
+    /// concurrent Scripture triggers each advance position while only one's L0
+    /// writes survive — previously, position and content could drift apart.
+    /// </summary>
     public ScriptureReference GetNextScriptureReference()
     {
         var progress = GetReadingProgress();
@@ -97,10 +138,31 @@ public class Scripture
         var book = ReadingPlan[bookIndex];
         var chapter = chapterIndex + 1;
 
-        // Format reference
         var reference = book.Chapters == 1 ? book.Name : $"{book.Name} {chapter}";
 
-        // Advance
+        return new ScriptureReference { Book = book.Name, Chapter = chapter, Reference = reference };
+    }
+
+    /// <summary>
+    /// Advance and persist reading progress past the given reference. Call after
+    /// the reading has been fully journaled so that partial writes (LLM failure,
+    /// race with another trigger) don't leave position ahead of content.
+    /// </summary>
+    private void CommitReadingProgress(ScriptureReference justRead)
+    {
+        var progress = GetReadingProgress();
+        var bookIndex = progress.BookIndex;
+        var chapterIndex = progress.ChapterIndex;
+
+        // Wrap around if caller returned a post-wrap reference
+        if (bookIndex >= ReadingPlan.Count)
+        {
+            bookIndex = 0;
+            chapterIndex = 0;
+        }
+
+        var book = ReadingPlan[bookIndex];
+
         chapterIndex++;
         if (chapterIndex >= book.Chapters)
         {
@@ -112,11 +174,9 @@ public class Scripture
         {
             BookIndex = bookIndex,
             ChapterIndex = chapterIndex,
-            LastReference = reference,
+            LastReference = justRead.Reference,
             LastReadAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
         });
-
-        return new ScriptureReference { Book = book.Name, Chapter = chapter, Reference = reference };
     }
 
     public ScriptureStatus GetStatus()

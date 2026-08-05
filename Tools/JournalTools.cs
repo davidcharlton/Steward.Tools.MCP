@@ -4,6 +4,7 @@ using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using StewardMcp.Data;
 using StewardMcp.Formation;
+using StewardMcp.Services;
 
 namespace StewardMcp.Tools;
 
@@ -17,13 +18,13 @@ public class JournalTools
     private readonly DossierBuilder _dossiers;
     private readonly ILogger<JournalTools> _logger;
 
-    public JournalTools(StewardDb db, VectorStore vectors, ReflectionPipeline reflections, TreeBuilder tree, DossierBuilder dossiers, ILogger<JournalTools> logger)
+    public JournalTools(UserSteward user, ILogger<JournalTools> logger)
     {
-        _db = db;
-        _vectors = vectors;
-        _reflections = reflections;
-        _tree = tree;
-        _dossiers = dossiers;
+        _db = user.Db;
+        _vectors = user.Vectors;
+        _reflections = user.Pipeline;
+        _tree = user.Tree;
+        _dossiers = user.Dossiers;
         _logger = logger;
     }
 
@@ -74,57 +75,88 @@ public class JournalTools
     }
 
     [McpServerTool]
-    [Description("Checkpoint a batch of conversation messages into the steward's memory. Use this to feed exchanges from any system (Claude Code, ChatGPT, email, etc.) into the steward's persistent memory. Messages are journaled as L0 events and reflections are triggered automatically. This is the 'memory stick' write-side — any host can contribute context.")]
+    [Description("Checkpoint a batch of conversation messages into the steward's memory. Use this to feed exchanges from any system (Claude Code, ChatGPT, email, etc.) into the steward's persistent memory. Messages are journaled as L0 events and reflections are triggered automatically. Trailing user messages (typically the meta-instruction that triggered the checkpoint) are dropped so reflection fires on a completed exchange. Each message may carry an optional externalId (e.g., source system's message ID) for idempotent re-imports — messages with an externalId that already exists in this thread are skipped. This is the 'memory stick' write-side — any host can contribute context.")]
     public async Task<string> CheckpointConversation(
         [Description("Stable conversation thread identifier")] string threadId,
-        [Description("Array of messages, each with 'role' (user/assistant) and 'content'")] List<CheckpointMessage> messages)
+        [Description("Array of messages, each with 'role' (user/assistant), 'content', and optional 'externalId' for dedupe")] List<CheckpointMessage> messages)
     {
         if (messages.Count == 0)
             return JsonSerializer.Serialize(new { ok = false, error = "No messages provided" });
 
+        // Drop trailing user messages: usually the "please checkpoint" meta-turn, and
+        // they leave reflection on a half-exchange boundary. Host can re-send in the next batch.
+        var trimmed = new List<CheckpointMessage>(messages);
+        while (trimmed.Count > 0 && (trimmed[^1].Role?.ToLower() ?? "user") != "assistant")
+            trimmed.RemoveAt(trimmed.Count - 1);
+
+        if (trimmed.Count == 0)
+            return JsonSerializer.Serialize(new { ok = false, error = "No assistant messages in batch after trimming trailing user messages" });
+
         var journalIds = new List<long>();
-        foreach (var msg in messages)
+        var dedupeCount = 0;
+        foreach (var msg in trimmed)
         {
+            if (!string.IsNullOrEmpty(msg.ExternalId))
+            {
+                var existing = await _db.FindJournalByExternalIdAsync(threadId, msg.ExternalId);
+                if (existing != null)
+                {
+                    dedupeCount++;
+                    continue;
+                }
+            }
+
             var role = msg.Role?.ToLower() ?? "user";
             var id = await _db.AppendJournalAsync(
-                threadId, mode: "chat", level: 0, content: msg.Content ?? "", role: role);
+                threadId, mode: "chat", level: 0, content: msg.Content ?? "", role: role,
+                externalId: string.IsNullOrEmpty(msg.ExternalId) ? null : msg.ExternalId);
             journalIds.Add(id);
             await EmbedL0Async(id, threadId, msg.Content ?? "");
         }
 
-        // Trigger reflections if the last message is from the assistant
-        var lastRole = messages[^1].Role?.ToLower();
         string reflectionStatus = "none";
         int? l1Count = null;
-
-        if (lastRole == "assistant")
+        if (journalIds.Count > 0)
             (reflectionStatus, l1Count) = await TriggerReflectionsAsync(threadId);
 
         return JsonSerializer.Serialize(new
         {
             ok = true,
             journalCount = journalIds.Count,
-            firstJournalId = journalIds[0],
-            lastJournalId = journalIds[^1],
+            trimmedCount = messages.Count - trimmed.Count,
+            dedupeCount,
+            firstJournalId = journalIds.Count > 0 ? journalIds[0] : (long?)null,
+            lastJournalId = journalIds.Count > 0 ? journalIds[^1] : (long?)null,
             reflectionStatus,
             l1Count,
         });
     }
 
     [McpServerTool]
-    [Description("Feed pre-summarized entries directly as L1 into the steward's reflection tree. Use this to seed the steward with conversation history from another system — the host summarizes its own conversations and the steward stores and cascades them. No LLM call on the steward's side. Great for onboarding: ChatGPT summarizes its last 20 conversations, sends them here, and the steward immediately has a rich dossier.")]
+    [Description("Feed pre-summarized entries directly as L1 into the steward's reflection tree. Use this to seed the steward with conversation history from another system — the host summarizes its own conversations and the steward stores and cascades them. No LLM call on the steward's side. Great for onboarding: ChatGPT summarizes its last 20 conversations, sends them here, and the steward immediately has a rich dossier. Each entry may carry an optional externalId (e.g., source conversation ID) for idempotent re-imports — entries with an externalId that already exists in this thread are skipped.")]
     public async Task<string> CheckpointSummary(
         [Description("Stable conversation thread identifier")] string threadId,
-        [Description("Array of pre-summarized entries to insert as L1s")] List<SummaryEntry> summaries)
+        [Description("Array of pre-summarized entries to insert as L1s. Each may include 'externalId' for dedupe on re-import.")] List<SummaryEntry> summaries)
     {
         if (summaries.Count == 0)
             return JsonSerializer.Serialize(new { ok = false, error = "No summaries provided" });
 
         var l1Ids = new List<long>();
+        var dedupeCount = 0;
         int l1Count = 0;
 
         foreach (var entry in summaries)
         {
+            if (!string.IsNullOrEmpty(entry.ExternalId))
+            {
+                var existing = await _db.FindJournalByExternalIdAsync(threadId, entry.ExternalId);
+                if (existing != null)
+                {
+                    dedupeCount++;
+                    continue;
+                }
+            }
+
             var content = entry.Summary ?? "";
             var payload = new
             {
@@ -137,7 +169,8 @@ public class JournalTools
 
             var l1Id = await _db.AppendJournalAsync(
                 threadId, mode: "reflection", level: 1,
-                content: content, payload: payload, meta: meta);
+                content: content, payload: payload, meta: meta,
+                externalId: string.IsNullOrEmpty(entry.ExternalId) ? null : entry.ExternalId);
             l1Ids.Add(l1Id);
 
             l1Count = await _db.GetL1CountForThreadAsync(threadId);
@@ -155,27 +188,31 @@ public class JournalTools
         }
 
         // Run binary cascade on final L1 count and rebuild dossiers
-        _ = Task.Run(async () =>
+        if (l1Ids.Count > 0)
         {
-            try
+            _ = Task.Run(async () =>
             {
-                await _tree.BuildTreeAfterL1Async(threadId, l1Count);
-                await _dossiers.RebuildDossierAsync(threadId);
-                await _dossiers.FeedDossierToMasterAsync(threadId);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Cascade after checkpoint_summary failed for thread {Thread}", threadId);
-            }
-        });
+                try
+                {
+                    await _tree.BuildTreeAfterL1Async(threadId, l1Count);
+                    await _dossiers.RebuildDossierAsync(threadId);
+                    await _dossiers.FeedDossierToMasterAsync(threadId);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Cascade after checkpoint_summary failed for thread {Thread}", threadId);
+                }
+            });
+        }
 
         return JsonSerializer.Serialize(new
         {
             ok = true,
             l1Count,
             insertedCount = l1Ids.Count,
-            firstL1Id = l1Ids[0],
-            lastL1Id = l1Ids[^1],
+            dedupeCount,
+            firstL1Id = l1Ids.Count > 0 ? l1Ids[0] : (long?)null,
+            lastL1Id = l1Ids.Count > 0 ? l1Ids[^1] : (long?)null,
         });
     }
 
@@ -222,6 +259,7 @@ public class CheckpointMessage
 {
     public string? Role { get; set; }
     public string? Content { get; set; }
+    public string? ExternalId { get; set; }
 }
 
 public class SummaryEntry
@@ -230,4 +268,5 @@ public class SummaryEntry
     public List<string>? KeyPoints { get; set; }
     public List<string>? Tags { get; set; }
     public string? SourceSystem { get; set; }
+    public string? ExternalId { get; set; }
 }

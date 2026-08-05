@@ -16,6 +16,8 @@ Your steward journals your conversations, compresses them into a reflection tree
 
 **Cross-system portability.** Feed conversations from any source — Claude Code, ChatGPT, email, anything — into one shared memory. The steward's understanding isn't locked to a single tool.
 
+**A voice, not just a vault.** Ask the steward a question with `consult_steward` and it answers in its *own* voice — drawing on its Scripture formation, its master dossier, and what it knows about you — rather than handing back stored text. The exchange is journaled, so consulting the steward also forms it.
+
 ## Quick Start
 
 ### Prerequisites
@@ -125,6 +127,7 @@ Both are local files. Your data stays on your machine.
 | `journal_exchange` | Record a user-assistant exchange pair in one call |
 | `checkpoint_conversation` | Batch-import messages from any system as L0 journal entries |
 | `checkpoint_summary` | Import pre-summarized entries directly as L1 reflections (zero LLM cost) |
+| `resolve_thread` | Resolve a stable host-context string (e.g. a repo path) to a canonical thread id |
 
 ### Memory
 
@@ -135,7 +138,14 @@ Both are local files. Your data stays on your machine.
 | `memory_get_journal` | Read recent conversation entries |
 | `memory_get_sources` | Trace a reflection back to the entries it was built from |
 | `memory_search` | Semantic search across journals, reflections, and workspace files |
+| `memory_list_threads` | List all conversation threads the steward knows |
 | `memory_scripture_status` | Scripture reading progress |
+
+### Consult
+
+| Tool | Description |
+|------|-------------|
+| `consult_steward` | Ask the steward a question and get its own formed response — its voice, not raw memory. The exchange is journaled back so consulting also forms it. |
 
 ### Mindfulness
 

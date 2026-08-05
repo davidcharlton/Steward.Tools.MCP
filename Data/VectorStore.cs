@@ -176,6 +176,23 @@ public class VectorStore : IDisposable
         }
     }
 
+    /// <summary>
+    /// Read a cosine-similarity score from the reader. DuckDB's list_cosine_similarity
+    /// over FLOAT[] columns can return either Single or Double depending on driver
+    /// version; calling GetDouble on a Single throws InvalidCastException. This tries
+    /// both and returns a float either way.
+    /// </summary>
+    private static float ReadScore(DuckDB.NET.Data.DuckDBDataReader reader, int ordinal)
+    {
+        var value = reader.GetValue(ordinal);
+        return value switch
+        {
+            float f => f,
+            double d => (float)d,
+            _ => Convert.ToSingle(value),
+        };
+    }
+
     public async Task<List<SearchResult>> QueryJournalsAsync(string queryText, string? threadId = null, int limit = 5, float minScore = 0.3f)
     {
         if (_disabled) return [];
@@ -205,7 +222,7 @@ public class VectorStore : IDisposable
             using var reader = cmd.ExecuteReader();
             while (reader.Read())
             {
-                var score = (float)reader.GetDouble(4);
+                var score = ReadScore(reader, 4);
                 if (score < minScore) continue;
                 results.Add(new SearchResult
                 {
@@ -249,7 +266,7 @@ public class VectorStore : IDisposable
             using var reader = cmd.ExecuteReader();
             while (reader.Read())
             {
-                var score = (float)reader.GetDouble(3);
+                var score = ReadScore(reader, 3);
                 if (score < minScore) continue;
                 results.Add(new SearchResult
                 {

@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Text.Json;
 using ModelContextProtocol.Server;
 using StewardMcp.Data;
+using StewardMcp.Services;
 
 namespace StewardMcp.Tools;
 
@@ -10,9 +11,9 @@ public class SearchTools
 {
     private readonly VectorStore _vectorStore;
 
-    public SearchTools(VectorStore vectorStore)
+    public SearchTools(UserSteward user)
     {
-        _vectorStore = vectorStore;
+        _vectorStore = user.Vectors;
     }
 
     [McpServerTool]
